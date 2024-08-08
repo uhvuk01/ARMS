@@ -1,0 +1,392 @@
+using System;
+using System.IO;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Management;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Data;
+using System.Windows.Documents;
+using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
+using System.Windows.Navigation;
+using System.Windows.Shapes;
+using MySql.Data.MySqlClient;
+using LiveCharts;
+using System.Windows.Threading;
+using LiveCharts.Wpf;
+using LiveCharts.Wpf.Charts.Base;
+using LiveCharts.Defaults;
+using System.Collections.ObjectModel;
+using MySqlX.XDevAPI.Common;
+using System.Runtime.ConstrainedExecution;
+using static System.Net.Mime.MediaTypeNames;
+
+namespace _0603_wpf
+{
+    /// <summary>
+    /// MainWindow.xaml에 대한 상호 작용 논리
+    /// </summary>
+    public partial class MainWindow : Window
+    {
+        static StreamWriter writers = new StreamWriter("C:\\Users\\LMS\\source\\repos\\0603_wpf\\0603_wpf\\0603_wpf\\Exceptions.txt");
+        static string[] resource = new string[10];
+        static string[] ment1 = new string[4]
+        {
+            "CPU",
+            "PROCESS",
+            "RAM",
+            "DISK",
+        };
+        static MySqlConnection puconn;
+        static MySqlConnection depuconn;
+        public ChartValues<double> CPU_VALUE { get; set; }
+        public ChartValues<double> Process_VALUE { get; set; }
+        DispatcherTimer UpdateUI_Timer = new DispatcherTimer();
+        DispatcherTimer background_Timer = new DispatcherTimer();
+        string txt, edge;
+        //List<string> items = new List<string>();
+        List<pp> choices = new List<pp>();
+        /////////////////////////////////////////////////////////////////////////////////////////
+        public MainWindow()
+        {
+            InitializeComponent();
+            Delete_History();//테이블 기록 삭제
+
+            USE_CPU.AxisY.Add(new LiveCharts.Wpf.Axis { MinValue = 0, MaxValue = 100 });
+            CPU_VALUE = new ChartValues<double> { 0 };
+            USE_Process.AxisY.Add(new LiveCharts.Wpf.Axis { MinValue = 0, MaxValue = 100 });
+            Process_VALUE = new ChartValues<double> { 0 };
+            Use_Ram.Value = 0;
+            Use_disk.Value = 0;
+            cb_1.ItemsSource = ment1;
+            DataContext = this;
+
+            UpdateUI_Timer.Interval = TimeSpan.FromMilliseconds(1000); //백그라운드가 가져온 리소스를 UI로 갱신해주는 역할
+            UpdateUI_Timer.Tick += Add_VALUES;
+            UpdateUI_Timer.Start();
+
+            Thread backgroundThread = new Thread(new ThreadStart(BackThread)); // -> 리소스 가져오고 디비에 넣는역할
+            backgroundThread.IsBackground = true;
+            backgroundThread.Start();
+        }
+
+        /////////////////////////////////////////////////////////////////////////////////////////
+        public async void Add_VALUES(object sender, EventArgs e)
+        {
+            CPU_VALUE.Add(Convert.ToDouble(resource[0]));
+            if (CPU_VALUE.Count == 60)
+                CPU_VALUE.RemoveAt(0);
+
+            Process_VALUE.Add(Convert.ToDouble(resource[1]));
+            if (Process_VALUE.Count == 60)
+                Process_VALUE.RemoveAt(0);
+            Use_Ram.Value = Math.Round(Convert.ToDouble(resource[3]) / Convert.ToDouble(resource[2]) * 100, 2);
+            Use_disk.Value = Math.Round(Convert.ToDouble(resource[7]) / Convert.ToDouble(resource[5]) * 100, 2);
+            DataContext = this;
+
+            if (Convert.ToDouble(resource[0]) > 10)
+            {
+                DateTime now = DateTime.Now;
+                await writers.WriteLineAsync($"|CPU 부하 수준 위험     | 시간 : {now}, 수치 : {Convert.ToDouble(resource[0])}");
+                await writers.FlushAsync();
+            }
+            if (Convert.ToDouble(resource[1]) > 5)
+            {
+                DateTime now = DateTime.Now;
+                await writers.WriteLineAsync($"|프로세스 사용 과다 위험 | 시간 : {now}, 갯수 :{Convert.ToDouble(resource[1])}");
+                await writers.FlushAsync();
+            }
+            if ((Convert.ToDouble(resource[3]) / Convert.ToDouble(resource[2]) * 100) > 80)
+            {
+                DateTime now = DateTime.Now;
+                await writers.WriteLineAsync($"|Ram 메모리 부족 경고   | 시간 : {now}, 사용 용량 :{Convert.ToDouble(Convert.ToDouble(resource[3]) / Convert.ToDouble(resource[2]) * 100)} %");
+                await writers.FlushAsync();
+            }
+            if ((Convert.ToDouble(resource[7]) / Convert.ToDouble(resource[5]) * 100) > 70)
+            {
+                DateTime now = DateTime.Now;
+                await writers.WriteLineAsync($"|디스크 부족 경고       | 시간 : {now}, 사용 용량 :{Convert.ToDouble(Convert.ToDouble(resource[7]) / Convert.ToDouble(resource[5]) * 100)} %");
+                await writers.FlushAsync();
+            }
+        }
+        /////////////////////////////////////////////////////////////////////////////////////////
+        public void Delete_History()
+        {
+            string ip = "127.0.0.1";
+            int port = 3306;
+            string uid = "OPERATOR";//Student OPERATOR
+            string pwd = "1234";
+            string dbname = "PJ_WPF";
+
+            MySqlConnection conn;
+            string connectString = $"Server={ip};Port={port};Database={dbname};Uid={uid};Pwd ={pwd}; CharSet = utf8;";
+            conn = new MySqlConnection(connectString);
+            puconn = conn;
+            depuconn = conn;
+            conn.Open();
+            conn.Ping();
+            MySqlDataReader del = null;
+            string deletequery = "DELETE FROM HISTORY;";
+            MySqlCommand deletecmd = new MySqlCommand(deletequery, conn);
+            del = deletecmd.ExecuteReader();
+            conn.Close();//쿼리하나 끝나면 닫아줌.
+        }
+        void BackThread()
+        {
+            background_Timer.Interval = TimeSpan.FromMilliseconds(1000);
+            background_Timer.Tick += Add_RESOURCE;
+            background_Timer.Start();
+        }
+        public void Add_RESOURCE(object sender, System.EventArgs e)
+        {
+
+            Task.Run(() => GetTotalCpuUsage());
+            Task.Run(() => GetProcessCpuUsage());
+            Task.Run(() => GetTotalMemory());
+            Task.Run(() => GetUsedMemory());
+            Task.Run(() => GetFreeMemory());
+            Task.Run(() => GetTotalDiskSpace());
+            Task.Run(() => GetFreeDiskSpace());
+            Task.Run(() => GetUsedDiskSpace());
+
+            puconn.Open();
+            puconn.Ping();
+            MySqlDataReader dr1 = null;
+            string insertquery = "INSERT INTO HISTORY VALUES " +
+            "(DATE_FORMAT(NOW(),'%Y%m%d %H시 %i분 %S초')," + resource[0] +
+            "," + resource[1] +
+            "," + resource[2] + "," + resource[3] +
+            "," + resource[4] + "," + resource[5] +
+            "," + resource[6] + "," + resource[7] + ");";
+            MySqlCommand insertcmd = new MySqlCommand(insertquery, puconn);
+            try
+            {
+                dr1 = insertcmd.ExecuteReader();
+            }
+            catch (MySqlException ex)
+            {
+                if (ex.Code == 1062) //PK값 중복 오류코드
+                {
+                    dr1 = null;
+                }
+            }
+            puconn.Close();
+        }
+        private static void GetTotalCpuUsage() //시스템 전체 cpu사용량
+        {
+            try
+            {
+                var wmi = new ManagementObjectSearcher("select * from Win32_PerfFormattedData_PerfOS_Processor where Name != '_Total'");
+                var cpuUsages = wmi.Get().Cast<ManagementObject>().Select(mo => (long)(ulong)mo["PercentProcessorTime"]);
+                var totalUsage = cpuUsages.Average();
+                resource[0] = Convert.ToString(totalUsage);
+            }
+            catch (Exception)
+            {
+                resource[0] = "-1";
+            }
+        }
+        private static void GetProcessCpuUsage() //현재 프로세스의 cpu사용량
+        {
+            try
+            {
+                var wmi = new ManagementObjectSearcher($"select * from Win32_PerfFormattedData_PerfProc_Process where Name='{Process.GetCurrentProcess().ProcessName}'");
+                var procTime = wmi.Get().Cast<ManagementObject>().Select(mo => (long)(ulong)mo["PercentProcessorTime"]).FirstOrDefault();
+                var procUsage = procTime / Environment.ProcessorCount;
+                resource[1] = Convert.ToString(procUsage);
+            }
+            catch (Exception)
+            {
+                resource[1] = "-1";
+            }
+        }
+        private static void GetTotalMemory() //RAM 총 용량
+        {
+            try
+            {
+                var searcher = new ManagementObjectSearcher("select * from Win32_OperatingSystem");
+                var results = searcher.Get().Cast<ManagementObject>().FirstOrDefault();
+
+                if (results != null)
+                {
+                    var totalMemory = Convert.ToDouble(results["TotalVisibleMemorySize"]); // in KB
+                    totalMemory /= 1024; // Convert to MB
+                    resource[2] = Convert.ToString(totalMemory);
+                }
+                else
+                {
+                    resource[2] = "-1";
+                }
+            }
+            catch (Exception)
+            {
+                resource[2] = "-1";// In case of any error
+            }
+        }
+        private static void GetUsedMemory() //RAM 사용량
+        {
+            try
+            {
+                var searcher = new ManagementObjectSearcher("select * from Win32_OperatingSystem");
+                var results = searcher.Get().Cast<ManagementObject>().FirstOrDefault();
+
+                if (results != null)
+                {
+                    var totalMemory = Convert.ToDouble(results["TotalVisibleMemorySize"]); // in KB
+                    var freeMemory = Convert.ToDouble(results["FreePhysicalMemory"]); // in KB
+                    var usedMemory = totalMemory - freeMemory;
+                    usedMemory /= 1024; // Convert to MB
+                    resource[3] = Convert.ToString(usedMemory);
+                }
+                else
+                {
+                    resource[3] = "-1"; // Unable to retrieve memory info
+                }
+            }
+            catch (Exception)
+            {
+                resource[3] = "-1"; // In case of any error
+            }
+        }
+        private static void GetFreeMemory() //RAM 남은 용량
+        {
+            try
+            {
+                var searcher = new ManagementObjectSearcher("select * from Win32_OperatingSystem");
+                var results = searcher.Get().Cast<ManagementObject>().FirstOrDefault();
+
+                if (results != null)
+                {
+                    var freeMemory = Convert.ToDouble(results["FreePhysicalMemory"]); // in KB
+                    freeMemory /= 1024; // Convert to MB
+
+                    resource[4] = Convert.ToString(freeMemory);
+                }
+                else
+                {
+
+                }
+            }
+            catch (Exception)
+            {
+                resource[4] = "-1";// In case of any error
+            }
+        }
+        private static void GetTotalDiskSpace() //디스크 총 용량
+        {
+            try
+            {
+                var searcher = new ManagementObjectSearcher("select * from Win32_LogicalDisk where DriveType=3");
+                var totalSpace = 0.0;
+
+                foreach (var drive in searcher.Get())
+                {
+                    totalSpace += Convert.ToDouble(drive["Size"]);
+                }
+
+                totalSpace /= (1024 * 1024 * 1024); // Convert to GB
+
+                resource[5] = Convert.ToString(totalSpace);
+            }
+            catch (Exception)
+            {
+                resource[5] = "-1";
+            }
+        }
+        private static void GetFreeDiskSpace() //남은 디스크 용량
+        {
+            try
+            {
+
+                var searcher = new ManagementObjectSearcher("select * from Win32_LogicalDisk where DriveType=3");
+                var freeSpace = 0.0;
+
+                foreach (var drive in searcher.Get())
+                {
+                    freeSpace += Convert.ToDouble(drive["FreeSpace"]);
+                }
+
+                freeSpace /= (1024 * 1024 * 1024); // Convert to GB
+
+                resource[6] = Convert.ToString(freeSpace);
+            }
+            catch (Exception)
+            {
+                resource[6] = "-1";
+            }
+        }
+        private static void GetUsedDiskSpace() //사용중인 디스크 용량
+        {
+            try
+            {
+                if (Convert.ToDouble(resource[5]) == -1 || (Convert.ToDouble(resource[6]) == -1))
+                {
+                    resource[7] = "-1";
+                }
+
+                var usedSpace = Convert.ToDouble(resource[5]) - Convert.ToDouble(resource[6]);
+
+                resource[7] = Convert.ToString(usedSpace);
+            }
+            catch (Exception)
+            {
+                resource[7] = "-1";
+            }
+        }
+
+
+        private async void cb_1_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            choices.Clear();
+            if (cb_1.SelectedItem.ToString() == "CPU")
+                txt = "CPU_USE";
+            if (cb_1.SelectedItem.ToString() == "PROCESS")
+                txt = "PROCESS_USE";
+            if (cb_1.SelectedItem.ToString() == "RAM")
+                txt = "MEMORY_USE";
+            if (cb_1.SelectedItem.ToString() == "DISK")
+                txt = "DISK_USE";
+
+            depuconn.Open();
+            depuconn.Ping();
+            MySqlDataReader dr2 = null;
+            string selectquery = $"SELECT DATE, {txt} FROM HISTORY;";
+            MySqlCommand selectcmd = new MySqlCommand(selectquery, depuconn);
+            dr2 = selectcmd.ExecuteReader();
+            while (dr2.Read())
+            {
+                pp ppap = new pp();
+                ppap.Times = (dr2[0].ToString());
+                if (txt == "CPU_USE")
+                    edge = " %";
+                else if (txt == "PROCESS_USE")
+                    edge = " 개";
+                else if (txt == "MEMORY_USE")
+                    edge = " GB";
+                else if (txt == "DISK_USE")
+                    edge = " GB";
+                ppap.Values = (dr2[1].ToString() + edge);
+                await Console.Out.WriteLineAsync(dr2[1].ToString());
+                choices.Add(ppap);
+            }
+            foreach (var choice in choices)
+            {
+                Console.WriteLine(choice.ToString());
+            }
+            lv_values.ItemsSource = choices;
+            depuconn.Close();
+            lv_values.Items.Refresh();
+        }
+    }
+    public class pp
+    {
+        public string Times { get; set; }
+        public string Values { get; set; }
+    }
+}
